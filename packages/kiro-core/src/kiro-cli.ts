@@ -117,6 +117,31 @@ function execKiroCliDb(dbPath: string, sql: string): boolean {
   }
 }
 
+/** kiro-cli's state-table key for the profile the CLI selected at login. */
+const SELECTED_PROFILE_KEY = "api.codewhisperer.profile";
+
+/**
+ * Read the profile ARN kiro-cli selected, from the `state` table.
+ *
+ * kiro-cli persists the profile it resolved during login under
+ * `api.codewhisperer.profile` — that row is what `kiro-cli whoami` prints. A
+ * token can legitimately have no entry in `ListAvailableProfiles` even though
+ * it owns a usable profile (observed with an IAM Identity Center session whose
+ * profile lives in the same region), so the stored selection is the
+ * authoritative ARN when the token record itself carries no `profile_arn`.
+ */
+function getKiroCliSelectedProfileArn(dbPath: string): string | undefined {
+  const result = queryKiroCliDb(dbPath, `SELECT value FROM state WHERE key = '${SELECTED_PROFILE_KEY}'`);
+  if (!result) return undefined;
+  try {
+    const rows = JSON.parse(result) as Array<{ value: string }>;
+    const parsed = JSON.parse(rows[0]?.value ?? "") as { arn?: unknown };
+    return typeof parsed.arn === "string" && parsed.arn ? parsed.arn : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function getKiroCliCredentials(): KiroCredentials | undefined {
   const dbPath = getKiroCliDbPath();
   if (!dbPath) return undefined;
@@ -180,6 +205,7 @@ function tryKiroCliToken(
   if (tokenData.expires_at) expiresAt = new Date(tokenData.expires_at).getTime();
   if (!allowExpired && Date.now() >= expiresAt - 2 * 60 * 1000) return undefined;
   const region = tokenData.region || "us-east-1";
+  const profileArn = tokenData.profile_arn || tokenData.profileArn || getKiroCliSelectedProfileArn(dbPath);
 
   if (authMethod === "desktop") {
     return {
@@ -190,7 +216,7 @@ function tryKiroCliToken(
       clientSecret: "",
       region,
       authMethod: "desktop",
-      profileArn: tokenData.profile_arn || tokenData.profileArn,
+      profileArn,
     };
   }
 
@@ -212,7 +238,7 @@ function tryKiroCliToken(
       clientSecret: "",
       region,
       authMethod: "external-idp",
-      profileArn: tokenData.profile_arn || tokenData.profileArn,
+      profileArn,
     };
   }
 
@@ -240,7 +266,7 @@ function tryKiroCliToken(
     clientSecret,
     region,
     authMethod: "idc",
-    profileArn: tokenData.profile_arn || tokenData.profileArn,
+    profileArn,
   };
 }
 

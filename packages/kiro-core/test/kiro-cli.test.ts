@@ -19,6 +19,7 @@ function makeTokenDb(profileArn?: string, authMethod: "idc" | "desktop" = "idc")
   const dbPath = join(tempDir, "data.sqlite3");
   const db = new DatabaseSync(dbPath);
   db.exec(`CREATE TABLE auth_kv (key TEXT PRIMARY KEY, value TEXT)`);
+  db.exec(`CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT)`);
   const token = JSON.stringify({
     access_token: "test-access",
     refresh_token: "test-refresh",
@@ -38,6 +39,14 @@ function makeTokenDb(profileArn?: string, authMethod: "idc" | "desktop" = "idc")
   return dbPath;
 }
 
+function selectCliProfile(dbPath: string, arn: string): void {
+  const db = new DatabaseSync(dbPath);
+  db.prepare(`INSERT OR REPLACE INTO state (key, value) VALUES ('api.codewhisperer.profile', ?)`).run(
+    JSON.stringify({ arn, profile_name: `KiroProfile-${arn.split(":")[3]}` }),
+  );
+  db.close();
+}
+
 describe("tryKiroCliToken (#110)", () => {
   it("carries profile_arn through the IDC token path", () => {
     const pinnedArn = "arn:aws:codewhisperer:eu-central-1:123456789012:profile/pinned";
@@ -55,12 +64,32 @@ describe("tryKiroCliToken (#110)", () => {
     expect(result?.authMethod).toBe("desktop");
   });
 
-  it("leaves profileArn undefined when the token has no profile", () => {
+  it("leaves profileArn undefined when neither the token nor the CLI state pins one", () => {
     const dbPath = makeTokenDb(undefined, "idc");
     const result = tryKiroCliToken(dbPath, "kirocli:odic:token", "idc");
     expect(result?.profileArn).toBeUndefined();
   });
+
+  // Live-probed 2026-10-01 on kiro-cli 2.25.0 / Windows: an IAM Identity
+  // Center session whose token record has no profile_arn and whose
+  // ListAvailableProfiles returns [] in every region still works, because the
+  // CLI persists the profile it selected at login under
+  // state['api.codewhisperer.profile'] — the same row `kiro-cli whoami` prints.
+  it("falls back to the CLI's selected profile when the token carries none", () => {
+    const cliArn = "arn:aws:codewhisperer:us-east-1:062175122149:profile/HKNDK33GH7MV";
+    const dbPath = makeTokenDb(undefined, "idc");
+    selectCliProfile(dbPath, cliArn);
+    expect(tryKiroCliToken(dbPath, "kirocli:odic:token", "idc")?.profileArn).toBe(cliArn);
+  });
+
+  it("prefers an inline profile_arn over the CLI's selected profile", () => {
+    const tokenArn = "arn:aws:codewhisperer:eu-central-1:123456789012:profile/token";
+    const dbPath = makeTokenDb(tokenArn, "idc");
+    selectCliProfile(dbPath, "arn:aws:codewhisperer:us-east-1:123456789012:profile/state");
+    expect(tryKiroCliToken(dbPath, "kirocli:odic:token", "idc")?.profileArn).toBe(tokenArn);
+  });
 });
+
 
 describe("external IdP tokens", () => {
   function makeExternalIdpDb(token: Record<string, unknown>): string {
